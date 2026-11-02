@@ -1,0 +1,8 @@
+mcp>=1.30,<2
+httpx
+pypdf
+pypdfium2
+pillow
+openpyxl
+python-docx
+python-pptx
