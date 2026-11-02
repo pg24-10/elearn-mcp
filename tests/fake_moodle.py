@@ -16,7 +16,7 @@ TOKEN = "testtoken0123456789abcdef01234567"
 calls: list[str] = []
 
 COURSES = [{"id": 11056, "fullname": "MKTS_PGPMOH_2026-27_T5", "shortname": "MKTS"},
-           {"id": 11057, "fullname": "STAR_PGPMOH_2026-27_T5", "shortname": "STAR"}]
+           {"id": 11057, "fullname": "Corporate Development: Mergers &amp; Acquisitions", "shortname": "STAR"}]
 
 
 def respond(fn: str, p: dict):
@@ -26,6 +26,9 @@ def respond(fn: str, p: dict):
     if fn == "core_enrol_get_users_courses":
         return COURSES
     if fn == "mod_forum_get_forums_by_courses":
+        if p.get("courseids[0]") == "11056":
+            return {"exception": "invalid_response_exception", "errorcode": "invalidresponse",
+                    "message": "Invalid response value detected"}
         return [{"id": 58963, "course": 11056, "type": "news", "name": "Announcements", "cmid": 900},
                 {"id": 58964, "course": 11056, "type": "general", "name": "Case forum", "cmid": 901,
                  "duedate": NOW + 3 * DAY, "grade_forum": 10, "numdiscussions": 2, "intro": "<p>Post your view</p>"},
@@ -61,14 +64,19 @@ def respond(fn: str, p: dict):
              "feedback": "<p>Good work</p>"},
             {"itemname": None, "itemtype": "course", "gradeformatted": "B+", "rangeformatted": "0-100"}]}]}
     if fn == "core_group_get_course_user_groups":
-        return {"groups": [{"id": 5, "name": "MKTS-Section B-Group 7", "courseid": 11056}]}
+        return {"groups": [{"id": 5, "name": "MKTS-Section B-Group 7", "courseid": 11056},
+                           {"id": 6, "name": "Section G", "courseid": 11056}]}
     if fn == "core_enrol_get_enrolled_users":
         assert p.get("options[0][name]") == "groupid", p
+        if p.get("options[0][value]") == "6":
+            return [{"fullname": f"Student {i}", "email": f"s{i}@isb.edu"} for i in range(60)]
         return [{"fullname": "Pranav Gupta", "email": "p@isb.edu"}, {"fullname": "Ritika Asnani", "email": "r@isb.edu"}]
     if fn == "mod_quiz_get_quizzes_by_courses":
         return {"quizzes": [{"id": 3, "course": 11057, "name": "Pre-read quiz", "timeopen": NOW,
                              "timeclose": NOW + 2 * DAY, "timelimit": 900, "attempts": 1, "grade": 10.0,
-                             "intro": "<p>Covers the case</p>"}]}
+                             "intro": "<p>Covers the case</p>"},
+                            {"id": 4, "course": 11057, "name": "Old quiz", "timeopen": NOW - 90 * DAY,
+                             "timeclose": NOW - 89 * DAY, "attempts": 1, "grade": 5.0}]}
     if fn == "mod_quiz_get_user_attempts":
         return {"attempts": [{"id": 1}]}
     if fn == "mod_quiz_get_user_best_grade":
@@ -90,7 +98,10 @@ def respond(fn: str, p: dict):
                                "timecreated": NOW - 6 * DAY, "timemodified": NOW - 6 * DAY}]},
                 {"name": "JSW case (watermarked)", "modname": "filewithwatermark",
                  "url": "http://127.0.0.1:8099/mod/filewithwatermark/view.php?id=2", "contents": []},
-                {"name": "Announcements", "modname": "forum", "instance": 58963,
+                {"name": "Case forum", "modname": "forum", "instance": 58964, "id": 901,
+                 "url": "http://127.0.0.1:8099/mod/forum/view.php?id=901",
+                 "dates": [{"label": "Due:", "timestamp": NOW + 3 * DAY}]},
+                {"name": "Announcements", "modname": "forum", "instance": 58963, "id": 900,
                  "url": "http://127.0.0.1:8099/mod/forum/view.php?id=900"},
                 {"name": "Reading list", "modname": "url", "url": "http://127.0.0.1:8099/mod/url/view.php?id=3",
                  "contents": [{"type": "url", "fileurl": "https://hbr.org/some-article"}]}]}]
@@ -98,10 +109,14 @@ def respond(fn: str, p: dict):
             {"name": "Session 1 slides", "modname": "resource",
              "contents": [{"type": "file", "filename": "s1.pptx", "fileurl": "http://127.0.0.1:8099/f/s1.pptx",
                            "timecreated": NOW - 40 * DAY, "timemodified": NOW - 40 * DAY}]}]}]
+    if fn == "core_calendar_get_action_events_by_timesort":
+        return {"events": [{"name": "Sooner one is due", "modulename": "assign", "instance": 99999,
+                            "timesort": NOW + DAY, "course": {"id": 11056, "fullname": "MKTS"},
+                            "url": "http://127.0.0.1:8099/mod/assign/view.php?id=5002"}]}
     if fn == "mod_assign_get_assignments":
         return {"courses": [{"fullname": "MKTS_PGPMOH_2026-27_T5", "assignments": [
             {"id": 1, "name": "Later one", "duedate": NOW + 20 * DAY, "teamsubmission": 1, "intro": "<p>B</p>"},
-            {"id": 2, "name": "Sooner one", "duedate": NOW + 1 * DAY, "teamsubmission": 0, "intro": "<p>A</p>"}]}]}
+            {"id": 2, "cmid": 5002, "name": "Sooner one", "duedate": NOW + 1 * DAY, "teamsubmission": 0, "intro": "<p>Write a 2-page P&amp;G memo</p>"}]}]}
     if fn == "mod_assign_get_submission_status":
         return {"lastattempt": {"submission": {"status": "new"}}}
     return {"exception": "invalid_parameter_exception", "errorcode": "invalidrecord",

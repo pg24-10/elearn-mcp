@@ -434,16 +434,33 @@ client = httpx.Client(timeout=60, follow_redirects=True)
 _site: dict | None = None
 
 
+def _tidy(v):
+    """Clean every tool reply: decode HTML entities eLearn leaves in names
+    ('P&amp;G' -> 'P&G') and drop empty (None) fields."""
+    if isinstance(v, str):
+        return unescape(v)
+    if isinstance(v, list):
+        return [_tidy(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _tidy(x) for k, x in v.items() if x is not None}
+    return v
+
+
 def tool(fn):
     """Register a tool. On the server, run it in a worker thread so one slow
     eLearn request doesn't freeze sign-ins and other requests."""
+    @functools.wraps(fn)
+    def tidy(*args, **kwargs):
+        return _tidy(fn(*args, **kwargs))
+
     if not SERVE:
-        return mcp.tool()(fn)
+        mcp.tool()(tidy)
+        return fn
     import anyio
 
     @functools.wraps(fn)
     async def runner(*args, **kwargs):
-        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+        return await anyio.to_thread.run_sync(functools.partial(tidy, *args, **kwargs))
     mcp.tool()(runner)
     return fn
 
@@ -649,6 +666,37 @@ def _my_forum_posts(forum_id: int, cmid: int | None) -> int | None:
         return None
 
 
+def _forums(course_ids: list[int]) -> list[dict]:
+    """Forums in these courses. Asks eLearn course by course, because one bad
+    forum makes eLearn reject the whole list ('Invalid response value'). If a
+    course still fails, falls back to the forums listed in its contents
+    (no grade flag there, so graded comes back as None = unknown)."""
+    out = []
+    for cid in course_ids:
+        try:
+            for f in call("mod_forum_get_forums_by_courses", courseids=[cid]):
+                f["graded"] = bool(f.get("grade_forum")) or bool(f.get("assessed"))
+                out.append(f)
+            continue
+        except Exception:
+            pass
+        try:
+            sections = contents_of(cid)
+        except Exception:
+            continue
+        for s in sections:
+            for m in s.get("modules", []):
+                if m.get("modname") != "forum":
+                    continue
+                name = m.get("name") or ""
+                due = next((d.get("timestamp") for d in m.get("dates") or []
+                            if "due" in (d.get("label") or "").lower()), None)
+                out.append({"id": m.get("instance"), "course": cid, "name": name, "cmid": m.get("id"),
+                            "type": "news" if re.search(r"(?i)announce|news", name) else "general",
+                            "duedate": due, "graded": None, "intro": m.get("description")})
+    return out
+
+
 @tool
 def forum_status(course_id: int | None = None, include_ungraded: bool = False) -> list[dict]:
     """Forums with a due date or a grade, and whether I have posted in them.
@@ -657,10 +705,9 @@ def forum_status(course_id: int | None = None, include_ungraded: bool = False) -
     """
     ids = [course_id] if course_id else my_course_ids()
     names = {c["id"]: c["fullname"] for c in call("core_enrol_get_users_courses", userid=user_id())}
-    forums = call("mod_forum_get_forums_by_courses", courseids=ids)
     out = []
-    for f in forums:
-        graded = bool(f.get("grade_forum")) or bool(f.get("assessed"))
+    for f in _forums(ids):
+        graded = f.get("graded")
         has_due = bool(f.get("duedate"))
         if f.get("type") == "news" or not (graded or has_due or include_ungraded):
             continue
@@ -670,7 +717,7 @@ def forum_status(course_id: int | None = None, include_ungraded: bool = False) -
             "forum": f.get("name"),
             "forum_id": f.get("id"),
             "due": when(f.get("duedate")),
-            "graded": graded,
+            "graded": "Unknown" if graded is None else graded,
             "posted": "Unknown" if n is None else ("Yes" if n > 0 else "No"),
             "my_posts": n,
             "discussions": f.get("numdiscussions"),
@@ -733,6 +780,7 @@ def upcoming_deadlines(days: int = 14) -> list[dict]:
     assign_courses = sorted({(e.get("course") or {}).get("id") for e in events
                              if e.get("modulename") == "assign"} - {None})
     idx = _assign_index(assign_courses) if assign_courses else {}
+    by_cmid = {a.get("cmid"): a for _, a in idx.values() if a.get("cmid")}
 
     out = []
     for e in events:
@@ -741,13 +789,17 @@ def upcoming_deadlines(days: int = 14) -> list[dict]:
                "due": when(e.get("timesort")),
                "activity": e.get("modulename"),
                "url": e.get("url")}
-        if e.get("modulename") == "assign" and e.get("instance") in idx:
-            a = idx[e["instance"]][1]
+        cmid = parse_qs(urlparse(e.get("url") or "").query).get("id", [None])[0]
+        a = None
+        if e.get("modulename") == "assign":
+            a = (idx.get(e.get("instance")) or (None, None))[1] or by_cmid.get(int(cmid) if cmid else None)
+        if a:
             row["type"] = "Group" if a.get("teamsubmission") else "Individual"
             st = _submission(a["id"])
             row["status"] = st.get("status")
+            row["brief"] = clean(a.get("intro"), 250) or "(no text brief; see assignments for files)"
+            row["assignment_id"] = a["id"]
         elif e.get("modulename") == "forum":
-            cmid = parse_qs(urlparse(e.get("url") or "").query).get("id", [None])[0]
             n = _my_forum_posts(e.get("instance"), int(cmid) if cmid else None)
             row["posted"] = "Unknown" if n is None else ("Yes" if n > 0 else "No")
         out.append(row)
@@ -1289,8 +1341,7 @@ def announcements(course_id: int | None = None, days: int = 21, limit: int = 25)
     Leave course_id empty to check every course."""
     names = course_names()
     since = time.time() - days * 86400
-    forums = [f for f in call("mod_forum_get_forums_by_courses", courseids=_course_ids(course_id))
-              if f.get("type") == "news"]
+    forums = [f for f in _forums(_course_ids(course_id)) if f.get("type") == "news"]
     posts = []
     for f in forums:
         try:
@@ -1414,7 +1465,10 @@ def my_groups(course_id: int | None = None, include_members: bool = True) -> lis
                 people = call("core_enrol_get_enrolled_users", courseid=g["courseid"], options=[
                     {"name": "groupid", "value": g["id"]},
                     {"name": "userfields", "value": "id,fullname,email"}])
-                row["members"] = [{"name": p.get("fullname"), "email": p.get("email")} for p in people]
+                if len(people) > 15:      # a whole section, not a project group
+                    row["member_count"] = len(people)
+                else:
+                    row["members"] = [{"name": p.get("fullname"), "email": p.get("email")} for p in people]
             except Exception as e:
                 row["members_error"] = f"eLearn didn't share the member list ({str(e)[:120]})"
         out.append(row)
@@ -1425,13 +1479,18 @@ def my_groups(course_id: int | None = None, include_members: bool = True) -> lis
 
 
 @tool
-def quizzes(course_id: int | None = None) -> list[dict]:
+def quizzes(course_id: int | None = None, include_past: bool = False) -> list[dict]:
     """Quizzes with open and close times, time limit, attempts allowed,
-    my attempts so far and my best grade. Leave course_id empty for every course."""
+    my attempts so far and my best grade. Shows open and upcoming quizzes
+    unless include_past is True. Leave course_id empty for every course."""
     names = course_names()
     d = call("mod_quiz_get_quizzes_by_courses", courseids=_course_ids(course_id))
-    out = []
+    now = time.time()
+    out, hidden = [], 0
     for q in sorted(d.get("quizzes", []), key=lambda q: q.get("timeclose") or 10**12):
+        if not include_past and q.get("timeclose") and q["timeclose"] < now:
+            hidden += 1
+            continue
         row = {"course": names.get(q.get("course"), q.get("course")),
                "quiz": q.get("name"),
                "opens": when(q.get("timeopen")),
@@ -1447,8 +1506,13 @@ def quizzes(course_id: int | None = None) -> list[dict]:
                 row["best_grade"] = f"{best.get('grade'):g} / {q.get('grade', 0):g}"
         except Exception:
             pass
+        if not include_past and not q.get("timeclose") and row.get("my_attempts"):
+            hidden += 1          # undated practice quiz already done
+            continue
         out.append(row)
-    return out
+    if hidden:
+        out.append({"note": f"{hidden} past or completed quizzes hidden. Use include_past=True to see them."})
+    return out or [{"note": "No open or upcoming quizzes."}]
 
 
 @tool
